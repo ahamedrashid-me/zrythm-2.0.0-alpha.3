@@ -4,7 +4,7 @@ SPDX-FileCopyrightText: © 2018-2026 Alexandros Theodotou <alex@zrythm.org>
 SPDX-License-Identifier: FSFAP
 -->
 
-# Zrythm GET PRO FOR FREE! https://drive.google.com/file/d/14rux94Y4-gpcYLvNUygZ2aziVwq8JJI0/view?usp=drive_link
+# Zrythm GET PRO FOR FREE! 
 
 *a highly automated and intuitive digital audio workstation*
 
