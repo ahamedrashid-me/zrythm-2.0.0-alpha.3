@@ -203,6 +203,127 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 If you would like to support this project, please consider donating at
 <https://www.zrythm.org/en/download.html> or through the links on the website.
 
+Here's my comprehensive assessment of the plugin management system and other key features in this Zrythm codebase:
+
+Plugin System Architecture Assessment
+1. Plugin Managers — Properly Implemented
+There are two distinct but complementary managers:
+
+A. PluginManager (in src/gui/backend/) — GUI/QML-facing manager
+
+Lives under namespace zrythm::gui::old_dsp::plugins
+Responsible for scanning and keeping track of available plugins
+Wraps JUCE's AudioPluginFormatManager and KnownPluginList
+Exposes PluginDescriptorList for QML binding
+Handles serialization/deserialization of known plugins to XML
+Adds internal (Faust) plugins to the known list at startup
+Prunes deleted plugin files during scan
+References: src/gui/backend/plugin_manager.h, plugin_manager.cpp
+B. PluginScanManager (in src/plugins/) — Headless scanner
+
+Runs scanning in a separate worker thread via Qt's QThread + Worker pattern
+Iterates through all registered plugin formats (CLAP, VST3, LV2, VST, AU, LADSPA, DSSI, SF2, SFZ, JSFX, Internal)
+Uses out-of-process scanning for crash isolation (OutOfProcessPluginScanner)
+Tracks currently-scanning plugin with mutex-protected state
+Emits scanningFinished and currentlyScanningPluginChanged signals
+Can be stopped gracefully via requestStop()
+2. Supported Plugin Protocols — Comprehensive
+The Plugin::ProtocolType enum covers 11 protocols:
+
+
+Internal, LV2, DSSI, LADSPA, VST, VST3, AudioUnit, SFZ, SF2, CLAP, JSFX
+Actual format implementations built into the binary:
+
+CLAP: Custom CLAPPluginFormat + ClapPlugin host (implements ClapHostBase with full clap_host callbacks)
+VST3: Custom Vst3PluginFormat (uses VST3 SDK directly for discovery) + Vst3Plugin host (implements IComponent/IAudioProcessor/IEditController)
+VST2/LV2/AU/LADSPA/DSSI: Handled via JUCE's built-in AudioPluginFormat implementations (added via juce::addDefaultFormatsToManager())
+Internal (Faust): FaustPlugin hosting bundled Faust DSPs compiled into Zrythm, with both FX (single dsp) and Instrument (PolyVoiceManager) modes
+3. Plugin Host Implementations — Robust
+Each plugin type has its own QObject-derived host class deriving from Plugin (which derives from ProcessorBase):
+
+Plugin Type	Host Class	Key Features
+CLAP	ClapPlugin	Full ClapHostBase implementation (audio ports, params, timer, log, latency, thread check, posix fd, thread pool, GUI). Uses clap::helpers::Host template with maximal checking
+VST3	Vst3Plugin	Native VST3 hosting via SDK's IComponent. Handles bus arrangements, presets, MIDI CC mapping, parameter creation, program changes
+JUCE-hosted (VST2/LV2/AU/etc)	JucePlugin	Wraps juce::AudioPluginInstance. Async initialization, parameter mapping, MIDI buffer management
+Internal (Faust)	FaustPlugin	Bundled Faust DSPs. FX mode with direct compute, Instrument mode with PolyVoiceManager. Rebuildable param mapping
+4. Plugin Factory & Object Model — Modern C++
+PluginFactory uses the Builder pattern to construct plugin instances
+Dispatches to appropriate builder based on ProtocolType (CLAP→ClapPlugin, VST3→Vst3Plugin, Internal→FaustPlugin, else→JucePlugin)
+Uses utils::create_object<PluginT>() for typed object creation with registry
+PluginUuidReference (typed UUID reference) for safe cross-references
+Fully serializable via to_json/from_json with base64-encoded plugin state
+5. PluginGroup — Flexible Container System
+PluginGroup derives from QAbstractListModel for QML integration
+Supports Serial (chain) and Parallel (sum) processing modes
+Recursive nesting (groups can contain groups)
+Type-safe: DeviceGroupType enum (Audio, MIDI, Instrument, CV)
+Built-in fader for level control with mute/solo
+Used in channels for MIDI FX, Instrument, and Audio FX processing
+6. Plugin Host Window System — Cross-Platform
+Two implementations:
+
+QtPluginHostWindow: For X11/xcb, Win32, Cocoa — uses Qt Widgets top-level window with offscreen QML header
+X11PluginHostWindow: For GNU/Linux Wayland sessions — raw X11 window with XEmbed support
+Key features:
+
+PluginViewResizeCoordinator handles resize coordination between host and plugin (CLAP adjust_size/set_size, VST3 checkSizeConstraint/onSize)
+Header strip with preset popup (rendered offscreen via QML)
+Scale factor tracking (contentScaleFactor) for HiDPI
+Close requests hide rather than destroy (plugin owns editor window)
+7. Plugin Discovery & Scanning — Safe
+Out-of-process scanning via OutOfProcessPluginScanner (spawns subprocess to isolate crashes)
+SubprocessCoordinator handles IPC with condition variable synchronization
+Blacklisting of crashed plugins via JUCE's dead man's pedal mechanism
+Known plugins serialized to XML for persistence
+Skip-environment-variable support (ZRYTHM_SKIP_PLUGIN_SCAN)
+8. Other Key Features Verification
+DSP Graph System:
+
+ProcessorBase → Plugin hierarchy with proper process_impl, prepare_plugin_for_processing, release_resources_impl overrides
+[[clang::nonblocking]] annotation on real-time audio processing paths
+Parameter sync with ParamSync and change_tracker() for efficient updates
+** Faust Plugin System:**
+
+Architecture file (faust_base.h) provides minimal dsp, UI, Meta, Soundfile base classes
+Faust-generated code compiles standalone (no Faust headers needed at runtime)
+FaustPluginInfo registry with create_ and class_init_ function pointers
+PolyVoiceManager for polyphonic instruments with release-tail detection
+Build System:
+
+VST3 SDK via CPM (v3.8.0_build_66), CLAP via CPM (v1.2.7), clap-helpers (v0.3)
+JUCE from custom fork (zrythm/JUCE, branch zrythm_fixes) with VST3 parameter-cache resync fix
+LV2 hosting enabled (ZRYTHM_WITH_JUCE_LV2_HOSTING=ON on Unix)
+Separate zrythm_vst3_hosting_lib static library for VST3 hosting glue code
+Tests:
+
+Extensive unit tests under tests/unit/plugins/: clap_plugin_test, faust_plugin_test, juce_plugin_test, vst3_plugin_test, plugin_factory_test, plugin_group_test, plugin_scan_manager_test, plugin_descriptor_test, etc.
+Integration tests: plugin_integration_test, test_plugins_scan_test
+CLAP test fixtures: test_gain_clap, test_configurable_clap, test_bad_ports_clap
+VST3 test plugins: test_gain_vst3, test_synth_vst3, test_latency_vst3, test_midi_cc_vst3, test_param_groups_vst3, test_programs_vst3, test_restart_vst3, test_gui_vst3
+9. Potential Concerns / Notes
+find_plugin_from_uri / find_from_descriptor / pick_instrument are TODO stubs — These PluginManager methods are #if 0'd out and return nullptr. The real lookup happens through the PluginDescriptorList QML model. This could be an issue if code paths depend on them.
+
+VST3 hosting is disabled in some build configurations — The compile commands show JUCE_PLUGINHOST_VST3=0 but the code has a full custom VST3 implementation via the VST3 SDK. This is expected since VST3 is hosted directly rather than through JUCE's VST3 plugin format.
+
+No VST2 hosting in the custom code path — VST2 relies entirely on JUCE's built-in format. This is standard practice.
+
+The "old_dsp" namespace for PluginManager suggests this is the older DSP GUI layer. The newer plugins namespace has the headless PluginScanManager. Both coexist.
+
+Conclusion
+The plugin management system is well-implemented and comprehensive, covering:
+
+Multiple plugin format discovery (CLAP, VST3, LV2, VST2, AU, LADSPA, DSSI, SF2, SFZ, JSFX)
+Out-of-process crash-safe scanning
+Threaded scanning with progress reporting
+Custom plugin hosts for CLAP and VST3 with full spec compliance
+JUCE-based hosting for legacy formats
+Bundled Faust plugin system with both FX and instrument support
+Flexible PluginGroup container architecture
+Cross-platform plugin window hosting (Qt/X11)
+Full serialization and QML integration
+Extensive test coverage
+The architecture follows modern C++23 patterns with proper use of std::unique_ptr, std::span, concepts, ranges, pimpl, and [[clang::nonblocking]] for real-time safety.
+
 ## Repository
 
 - **Canonical upstream:** <https://gitlab.zrythm.org/zrythm/zrythm>
